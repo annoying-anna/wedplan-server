@@ -261,7 +261,7 @@ vercel --prod
 
 ## 📦 Git Commit Requirement
 
-This repository contains **18+ meaningful commits** (the assignment requires at least 12). The client repository contains **34+ meaningful commits** (requirement: at least 20).
+This repository contains **20+ meaningful commits** (the assignment requires at least 12). The client repository contains **37+ meaningful commits** (requirement: at least 20).
 
 ---
 
