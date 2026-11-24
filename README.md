@@ -55,3 +55,7 @@ IMGBB_API_KEY=your_imgbb_key
 - **Vendor (Premium)**: `aurora@wedplan.com` / `Password123`
 - **Vendor (Free)**: `sophia@wedplan.com` / `Password123`
 - **Customer**: `emily@wedplan.com` / `Password123`
+
+## GitHub Repositories
+- **Server**: [https://github.com/annoying-anna/wedplan-server](https://github.com/annoying-anna/wedplan-server)
+- **Client**: [https://github.com/annoying-anna/wedplan-client](https://github.com/annoying-anna/wedplan-client)
