@@ -22,6 +22,7 @@ Secure, role-based REST API for the **WedPlan** wedding planning platform. Built
 - **Account blocking** — blocked users are rejected with `403 Forbidden` on every protected route.
 - **Service catalog** — full CRUD, keyword search, category/location filters, price sorting, and an Admin approval workflow (`pending`, `approved`, `rejected`).
 - **Free vs. Premium enforcement** — Free vendors may have at most **3 active services**; Premium vendors are unlimited.
+- **Subscription lifecycle** — expired Premium plans are automatically downgraded to Free on the next authenticated request.
 - **Booking workflow** — customers submit inquiries, vendors accept/reject, customers cancel pending requests. Duplicate active requests for the same service/date are rejected.
 - **Stripe Checkout & webhooks** — server-created sessions, signature-verified webhooks, server-side session verification, and an immutable transaction ledger.
 - **Role-based statistics** — dashboard aggregations for Admin, Vendor, and Customer.
@@ -224,7 +225,7 @@ npm start
 - **Role middleware** — `verifyAdmin`, `verifyVendor`, and `verifyCustomer` run after `protect` on every protected route.
 - **Blocked accounts** — `protect` loads the user from MongoDB and returns `403` when `isBlocked` is true.
 - **Ownership checks** — vendors may only edit/delete their own services and decide their own bookings; customers may only cancel their own pending bookings.
-- **Server-side validation** — required fields, allowed categories/statuses, price/date checks, and password complexity.
+- **Server-side validation** — required fields, allowed categories/statuses, price/date checks, and password complexity. Malformed MongoDB IDs return a clean `404` instead of a `500`.
 - **CORS allowlist** — localhost, `*.vercel.app` previews, and the configured `CLIENT_URL`; other origins receive no CORS headers.
 - **Payment verification** — with real Stripe keys, `verify-session` retrieves the Checkout Session, requires `payment_status === "paid"`, and verifies the session belongs to the requesting vendor. Webhooks are signature-verified and idempotent. The simulated checkout is only available when Stripe is absent and `ALLOW_MOCK_PAYMENTS=true`.
 - **Secrets** — `.env*` files are git-ignored; only `.env.example` is committed.

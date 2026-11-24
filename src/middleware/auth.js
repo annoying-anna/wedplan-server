@@ -40,6 +40,17 @@ const protect = async (req, res, next) => {
       });
     }
 
+    // Automatically downgrade expired Premium subscriptions.
+    if (
+      user.subscriptionPlan === 'premium' &&
+      user.subscriptionExpiresAt &&
+      new Date(user.subscriptionExpiresAt).getTime() < Date.now()
+    ) {
+      user.subscriptionPlan = 'free';
+      user.subscriptionExpiresAt = null;
+      await user.save();
+    }
+
     req.user = user;
     next();
   } catch (error) {

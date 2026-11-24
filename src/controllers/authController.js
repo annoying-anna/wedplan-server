@@ -18,6 +18,20 @@ const formatUserResponse = (user) => {
   };
 };
 
+// Automatically downgrade an expired Premium subscription on login.
+const normalizeExpiredSubscription = async (user) => {
+  if (
+    user.subscriptionPlan === 'premium' &&
+    user.subscriptionExpiresAt &&
+    new Date(user.subscriptionExpiresAt).getTime() < Date.now()
+  ) {
+    user.subscriptionPlan = 'free';
+    user.subscriptionExpiresAt = null;
+    await user.save();
+  }
+  return user;
+};
+
 // @desc    Register a new user
 // @route   POST /api/auth/register
 // @access  Public
@@ -141,6 +155,8 @@ const login = async (req, res) => {
       });
     }
 
+    await normalizeExpiredSubscription(user);
+
     const token = generateToken({ id: user._id, role: user.role });
 
     return res.status(200).json({
@@ -197,6 +213,8 @@ const googleAuth = async (req, res) => {
         isBlocked: false,
       });
     }
+
+    await normalizeExpiredSubscription(user);
 
     const token = generateToken({ id: user._id, role: user.role });
 
