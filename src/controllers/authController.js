@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const dns = require('dns').promises;
 const nodemailer = require('nodemailer');
 const User = require('../models/User');
 const { generateToken } = require('../utils/jwt');
@@ -34,7 +35,84 @@ const normalizeExpiredSubscription = async (user) => {
   return user;
 };
 
-// @desc    Register a new user
+// Verify that the email domain has valid MX records (rejects non-existent domains)
+const hasValidEmailDomain = async (email) => {
+  const domain = email.split('@')[1];
+  if (!domain) return false;
+  try {
+    const records = await dns.resolveMx(domain);
+    return Array.isArray(records) && records.length > 0;
+  } catch {
+    return false;
+  }
+};
+
+// Generate a 6-digit OTP, save its hash on the user, and send it to the user's real inbox
+const dispatchOtpEmail = async (user, subject, heading, introText) => {
+  const code = crypto.randomInt(100000, 999999).toString();
+  const salt = await bcrypt.genSalt(10);
+  user.otpCode = await bcrypt.hash(code, salt);
+  user.otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+  await user.save();
+
+  const htmlBody = `
+    <div style="font-family: Georgia, serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #FAF8F5; border: 1px solid #E8E2D9; border-radius: 16px;">
+      <h2 style="color: #1C1917; margin-bottom: 8px;">${heading}</h2>
+      <p style="color: #57534E; font-size: 14px;">Hello ${user.name}, ${introText} This code expires in 10 minutes.</p>
+      <div style="margin: 24px 0; padding: 16px; background: #FFFFFF; border: 1px solid #C59B6D; border-radius: 12px; text-align: center; font-size: 28px; letter-spacing: 8px; font-weight: bold; color: #1C1917;">
+        ${code}
+      </div>
+      <p style="color: #78716C; font-size: 12px;">If you did not request this code, you can safely ignore this email.</p>
+    </div>
+  `;
+
+  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: Number(process.env.SMTP_PORT) === 465,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
+
+    await transporter.sendMail({
+      from: `"WedPlan Concierge" <${process.env.SMTP_USER}>`,
+      to: user.email,
+      subject,
+      html: htmlBody,
+    });
+    return true;
+  }
+
+  if (process.env.RESEND_API_KEY) {
+    const resp = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: process.env.RESEND_FROM || 'WedPlan Concierge <onboarding@resend.dev>',
+        to: [user.email],
+        subject,
+        html: htmlBody,
+      }),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      throw new Error(errBody.message || 'Resend email delivery failed.');
+    }
+    return true;
+  }
+
+  throw new Error(
+    'Email delivery is not configured on the server yet. Please configure SMTP_USER/SMTP_PASS (Gmail App Password) or RESEND_API_KEY.'
+  );
+};
+
+// @desc    Register a new user (requires 6-digit email verification before activation)
 // @route   POST /api/auth/register
 // @access  Public
 const register = async (req, res) => {
@@ -53,6 +131,17 @@ const register = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Admin accounts cannot be created through public registration.',
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Verify email domain has valid MX records
+    const domainValid = await hasValidEmailDomain(normalizedEmail);
+    if (!domainValid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a valid email address with an active mail domain.',
       });
     }
 
@@ -79,8 +168,8 @@ const register = async (req, res) => {
     }
 
     // Check existing email
-    const existingUser = await User.findOne({ email: email.toLowerCase().trim() });
-    if (existingUser) {
+    let user = await User.findOne({ email: normalizedEmail });
+    if (user && user.isEmailVerified !== false) {
       return res.status(400).json({
         success: false,
         message: 'An account with this email already exists.',
@@ -91,30 +180,108 @@ const register = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    const newUser = await User.create({
-      name: name.trim(),
-      email: email.toLowerCase().trim(),
-      password: hashedPassword,
-      image: image || undefined,
-      role: assignedRole,
-      businessName: assignedRole === 'vendor' ? (businessName || `${name.trim()}'s Services`) : '',
-      subscriptionPlan: 'free',
-      isBlocked: false,
-    });
+    if (user && user.isEmailVerified === false) {
+      // Update unverified pending registration & resend verification code
+      user.name = name.trim();
+      user.password = hashedPassword;
+      if (image) user.image = image;
+      user.role = assignedRole;
+      user.businessName =
+        assignedRole === 'vendor' ? businessName || `${name.trim()}'s Services` : '';
+    } else {
+      user = await User.create({
+        name: name.trim(),
+        email: normalizedEmail,
+        password: hashedPassword,
+        image: image || undefined,
+        role: assignedRole,
+        businessName:
+          assignedRole === 'vendor' ? businessName || `${name.trim()}'s Services` : '',
+        subscriptionPlan: 'free',
+        isBlocked: false,
+        isEmailVerified: false,
+      });
+    }
 
-    const token = generateToken({ id: newUser._id, role: newUser.role });
+    await dispatchOtpEmail(
+      user,
+      'Verify Your WedPlan Account',
+      'Verify Your WedPlan Email',
+      'enter the 6-digit verification code below to confirm you own this email address and activate your account.'
+    );
 
     return res.status(201).json({
       success: true,
-      message: 'Account registered successfully.',
-      token,
-      user: formatUserResponse(newUser),
+      requiresVerification: true,
+      email: user.email,
+      message: `Verification code sent to ${user.email}. Please check your inbox to complete registration.`,
     });
   } catch (error) {
     console.error('Registration Error:', error);
     return res.status(500).json({
       success: false,
       message: error.message || 'Server error during registration.',
+    });
+  }
+};
+
+// @desc    Verify newly registered email with 6-digit code & activate account
+// @route   POST /api/auth/verify-email
+// @access  Public
+const verifyEmail = async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide both email and the 6-digit verification code.',
+      });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select(
+      '+otpCode +otpExpiresAt'
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Account not found.',
+      });
+    }
+
+    if (!user.otpCode || !user.otpExpiresAt || user.otpExpiresAt.getTime() < Date.now()) {
+      return res.status(401).json({
+        success: false,
+        message: 'Verification code has expired. Please request a new code.',
+      });
+    }
+
+    const isValid = await bcrypt.compare(code.trim(), user.otpCode);
+    if (!isValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid verification code. Please check your inbox and try again.',
+      });
+    }
+
+    user.isEmailVerified = true;
+    user.otpCode = null;
+    user.otpExpiresAt = null;
+    await user.save();
+
+    const token = generateToken({ id: user._id, role: user.role });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Email verified! Welcome to WedPlan.',
+      token,
+      user: formatUserResponse(user),
+    });
+  } catch (error) {
+    console.error('Verify Email Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error verifying email.',
     });
   }
 };
@@ -146,6 +313,14 @@ const login = async (req, res) => {
       return res.status(403).json({
         success: false,
         message: 'Your account is blocked. Please contact support.',
+      });
+    }
+
+    if (user.isEmailVerified === false) {
+      return res.status(403).json({
+        success: false,
+        requiresVerification: true,
+        message: 'Please verify your email address with the 6-digit code sent to your inbox before signing in.',
       });
     }
 
@@ -316,59 +491,22 @@ const sendLoginOtp = async (req, res) => {
       });
     }
 
-    const code = crypto.randomInt(100000, 999999).toString();
-    const salt = await bcrypt.genSalt(10);
-    user.otpCode = await bcrypt.hash(code, salt);
-    user.otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-    await user.save();
-
-    let emailDispatched = false;
-    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-      try {
-        const transporter = nodemailer.createTransport({
-          host: process.env.SMTP_HOST || 'smtp.gmail.com',
-          port: Number(process.env.SMTP_PORT || 587),
-          secure: Number(process.env.SMTP_PORT) === 465,
-          auth: {
-            user: process.env.SMTP_USER,
-            pass: process.env.SMTP_PASS,
-          },
-        });
-
-        await transporter.sendMail({
-          from: `"WedPlan Concierge" <${process.env.SMTP_USER}>`,
-          to: user.email,
-          subject: 'Your WedPlan Sign-In Verification Code',
-          html: `
-            <div style="font-family: Georgia, serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #FAF8F5; border: 1px solid #E8E2D9; border-radius: 16px;">
-              <h2 style="color: #1C1917; margin-bottom: 8px;">WedPlan Atelier Sign-In</h2>
-              <p style="color: #57534E; font-size: 14px;">Hello ${user.name}, use the verification code below to sign in to your account. This code expires in 10 minutes.</p>
-              <div style="margin: 24px 0; padding: 16px; background: #FFFFFF; border: 1px solid #C59B6D; border-radius: 12px; text-align: center; font-size: 28px; letter-spacing: 8px; font-weight: bold; color: #1C1917;">
-                ${code}
-              </div>
-              <p style="color: #78716C; font-size: 12px;">If you did not request this code, you can safely ignore this email.</p>
-            </div>
-          `,
-        });
-        emailDispatched = true;
-      } catch (mailErr) {
-        console.warn('SMTP send failed, falling back to demo OTP preview:', mailErr.message);
-      }
-    }
+    await dispatchOtpEmail(
+      user,
+      'Your WedPlan Sign-In Verification Code',
+      'WedPlan Atelier Sign-In',
+      'use the verification code below to sign in to your account.'
+    );
 
     return res.status(200).json({
       success: true,
-      message: emailDispatched
-        ? `A 6-digit verification code has been sent to ${user.email}.`
-        : `Verification code generated for ${user.email}.`,
-      emailDispatched,
-      ...(emailDispatched ? {} : { demoOtp: code }),
+      message: `A 6-digit verification code has been sent to ${user.email}.`,
     });
   } catch (error) {
     console.error('Send OTP Error:', error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to generate verification code.',
+      message: error.message || 'Failed to send verification code.',
     });
   }
 };
@@ -451,6 +589,7 @@ const verifyLoginOtp = async (req, res) => {
 
 module.exports = {
   register,
+  verifyEmail,
   login,
   googleAuth,
   sendLoginOtp,
