@@ -1,6 +1,19 @@
 const Service = require('../models/Service');
 const User = require('../models/User');
 
+const FREE_PLAN_ACTIVE_LIMIT = 3;
+
+/**
+ * Free vendors may have at most 3 active (live or pending) services.
+ * Rejected and deliberately deactivated services do not count toward the cap.
+ */
+const countActiveServicesForVendor = (vendorId) =>
+  Service.countDocuments({
+    vendorId,
+    isActive: true,
+    status: { $in: ['approved', 'pending'] },
+  });
+
 // @desc    Get all active & approved services (with search, category, location, sort)
 // @route   GET /api/services
 // @access  Public
@@ -134,6 +147,21 @@ const getServiceById = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Service not found.' });
     }
 
+    // Public visitors may only view approved, active listings.
+    // The owning vendor and admins may preview pending/inactive/rejected listings.
+    const isPubliclyVisible = service.status === 'approved' && service.isActive;
+    const requester = req.user;
+    const isOwner =
+      requester && service.vendorId && service.vendorId._id.toString() === requester._id.toString();
+    const isAdmin = requester && requester.role === 'admin';
+
+    if (!isPubliclyVisible && !isOwner && !isAdmin) {
+      return res.status(404).json({
+        success: false,
+        message: 'This service is not available for public viewing.',
+      });
+    }
+
     return res.status(200).json({
       success: true,
       service,
@@ -170,12 +198,9 @@ const createService = async (req, res) => {
     const isPremium = vendor.subscriptionPlan === 'premium';
 
     if (!isPremium) {
-      const activeServicesCount = await Service.countDocuments({
-        vendorId: req.user._id,
-        status: { $in: ['approved', 'pending'] },
-      });
+      const activeServicesCount = await countActiveServicesForVendor(req.user._id);
 
-      if (activeServicesCount >= 3) {
+      if (activeServicesCount >= FREE_PLAN_ACTIVE_LIMIT) {
         return res.status(403).json({
           success: false,
           limitReached: true,
@@ -245,6 +270,21 @@ const updateService = async (req, res) => {
 
     const { serviceName, category, description, price, location, images, isActive } = req.body;
 
+    // Enforce the Free Plan cap when reactivating a service.
+    if (isActive !== undefined && Boolean(isActive) && !service.isActive) {
+      const vendor = await User.findById(req.user._id);
+      if (vendor.subscriptionPlan !== 'premium') {
+        const activeServicesCount = await countActiveServicesForVendor(req.user._id);
+        if (activeServicesCount >= FREE_PLAN_ACTIVE_LIMIT) {
+          return res.status(403).json({
+            success: false,
+            limitReached: true,
+            message: `Free Plan limit reached: a maximum of ${FREE_PLAN_ACTIVE_LIMIT} active services is allowed. Please upgrade to Premium to activate more listings.`,
+          });
+        }
+      }
+    }
+
     if (serviceName) service.serviceName = serviceName.trim();
     if (category) service.category = category;
     if (description) service.description = description.trim();
@@ -312,6 +352,21 @@ const toggleAvailability = async (req, res) => {
         success: false,
         message: 'Unauthorized: You can only modify your own services.',
       });
+    }
+
+    // Enforce the Free Plan cap when reactivating a service.
+    if (!service.isActive) {
+      const vendor = await User.findById(req.user._id);
+      if (vendor.subscriptionPlan !== 'premium') {
+        const activeServicesCount = await countActiveServicesForVendor(req.user._id);
+        if (activeServicesCount >= FREE_PLAN_ACTIVE_LIMIT) {
+          return res.status(403).json({
+            success: false,
+            limitReached: true,
+            message: `Free Plan limit reached: a maximum of ${FREE_PLAN_ACTIVE_LIMIT} active services is allowed. Please upgrade to Premium to activate more listings.`,
+          });
+        }
+      }
     }
 
     service.isActive = !service.isActive;

@@ -19,19 +19,24 @@ connectDB();
 const app = express();
 
 // Middlewares
+const configuredClientUrl = (process.env.CLIENT_URL || '').replace(/\/$/, '');
+
 app.use(
   cors({
     origin: function (origin, callback) {
-      if (
-        !origin ||
-        origin.endsWith('.vercel.app') ||
-        origin.includes('localhost') ||
-        origin.includes('127.0.0.1')
-      ) {
-        callback(null, true);
-      } else {
-        callback(null, true);
+      // Allow server-to-server / curl requests with no Origin header.
+      if (!origin) return callback(null, true);
+
+      const normalized = origin.replace(/\/$/, '');
+      const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized);
+      const isVercelPreview = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(normalized);
+      const isConfiguredClient = Boolean(configuredClientUrl) && normalized === configuredClientUrl;
+
+      if (isLocalhost || isVercelPreview || isConfiguredClient) {
+        return callback(null, true);
       }
+
+      return callback(null, false);
     },
     credentials: true,
   })

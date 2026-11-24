@@ -14,7 +14,7 @@ const {
   updateServiceStatus,
   deleteAdminService,
 } = require('../controllers/serviceController');
-const { protect, verifyVendor, verifyAdmin } = require('../middleware/auth');
+const { protect, optionalAuth, verifyVendor, verifyAdmin } = require('../middleware/auth');
 
 // Public routes
 router.get('/', getServices);
@@ -33,7 +33,7 @@ router.get('/admin/all', protect, verifyAdmin, getAdminServices);
 router.patch('/:id/status', protect, verifyAdmin, updateServiceStatus);
 router.delete('/admin/:id', protect, verifyAdmin, deleteAdminService);
 
-// Single service public (placed last so specific named routes match first)
-router.get('/:id', getServiceById);
+// Single service (optional auth lets the owner/admin preview pending listings)
+router.get('/:id', optionalAuth, getServiceById);
 
 module.exports = router;
