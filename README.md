@@ -2,6 +2,15 @@
 
 A secure, role-based REST API built with Node.js, Express.js, and MongoDB for the WedPlan wedding planning platform.
 
+---
+
+## 🌐 Live API & Links
+- **Live Backend API**: [https://wedplan-server-gilt.vercel.app](https://wedplan-server-gilt.vercel.app)
+- **Live Frontend**: [https://client-rho-five-11.vercel.app](https://client-rho-five-11.vercel.app)
+- **GitHub Repository**: [https://github.com/annoying-anna/wedplan-server](https://github.com/annoying-anna/wedplan-server)
+
+---
+
 ## Important Features
 - **JWT Authentication & Authorization**: Secure token generation and verification middleware (`verifyToken`, `verifyAdmin`, `verifyVendor`, `verifyCustomer`).
 - **Account Blocking Security**: Blocked users are immediately barred from all protected platform features.
