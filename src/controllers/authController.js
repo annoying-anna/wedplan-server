@@ -1,4 +1,6 @@
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const User = require('../models/User');
 const { generateToken } = require('../utils/jwt');
 
@@ -286,10 +288,173 @@ const updateProfile = async (req, res) => {
   }
 };
 
+// @desc    Send 6-digit email verification code for passwordless login
+// @route   POST /api/auth/send-otp
+// @access  Public
+const sendLoginOtp = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || !email.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide your email address.',
+      });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'No WedPlan account found with this email address.',
+      });
+    }
+
+    if (user.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been blocked by an administrator.',
+      });
+    }
+
+    const code = crypto.randomInt(100000, 999999).toString();
+    const salt = await bcrypt.genSalt(10);
+    user.otpCode = await bcrypt.hash(code, salt);
+    user.otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    await user.save();
+
+    let emailDispatched = false;
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+      try {
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST || 'smtp.gmail.com',
+          port: Number(process.env.SMTP_PORT || 587),
+          secure: Number(process.env.SMTP_PORT) === 465,
+          auth: {
+            user: process.env.SMTP_USER,
+            pass: process.env.SMTP_PASS,
+          },
+        });
+
+        await transporter.sendMail({
+          from: `"WedPlan Concierge" <${process.env.SMTP_USER}>`,
+          to: user.email,
+          subject: 'Your WedPlan Sign-In Verification Code',
+          html: `
+            <div style="font-family: Georgia, serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #FAF8F5; border: 1px solid #E8E2D9; border-radius: 16px;">
+              <h2 style="color: #1C1917; margin-bottom: 8px;">WedPlan Atelier Sign-In</h2>
+              <p style="color: #57534E; font-size: 14px;">Hello ${user.name}, use the verification code below to sign in to your account. This code expires in 10 minutes.</p>
+              <div style="margin: 24px 0; padding: 16px; background: #FFFFFF; border: 1px solid #C59B6D; border-radius: 12px; text-align: center; font-size: 28px; letter-spacing: 8px; font-weight: bold; color: #1C1917;">
+                ${code}
+              </div>
+              <p style="color: #78716C; font-size: 12px;">If you did not request this code, you can safely ignore this email.</p>
+            </div>
+          `,
+        });
+        emailDispatched = true;
+      } catch (mailErr) {
+        console.warn('SMTP send failed, falling back to demo OTP preview:', mailErr.message);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: emailDispatched
+        ? `A 6-digit verification code has been sent to ${user.email}.`
+        : `Verification code generated for ${user.email}.`,
+      emailDispatched,
+      ...(emailDispatched ? {} : { demoOtp: code }),
+    });
+  } catch (error) {
+    console.error('Send OTP Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to generate verification code.',
+    });
+  }
+};
+
+// @desc    Verify 6-digit email verification code & issue JWT
+// @route   POST /api/auth/verify-otp
+// @access  Public
+const verifyLoginOtp = async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide both email and the 6-digit verification code.',
+      });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select(
+      '+otpCode +otpExpiresAt'
+    );
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid verification request.',
+      });
+    }
+
+    if (user.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been blocked by an administrator.',
+      });
+    }
+
+    if (!user.otpCode || !user.otpExpiresAt || user.otpExpiresAt.getTime() < Date.now()) {
+      return res.status(401).json({
+        success: false,
+        message: 'Verification code has expired or was not requested. Please request a new code.',
+      });
+    }
+
+    const isValid = await bcrypt.compare(code.trim(), user.otpCode);
+    if (!isValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid verification code. Please check and try again.',
+      });
+    }
+
+    user.otpCode = null;
+    user.otpExpiresAt = null;
+    await user.save();
+
+    await normalizeExpiredSubscription(user);
+
+    const token = generateToken({ id: user._id, role: user.role });
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Verified and signed in successfully!',
+      token,
+      user: formatUserResponse(user),
+    });
+  } catch (error) {
+    console.error('Verify OTP Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error verifying code.',
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
   googleAuth,
+  sendLoginOtp,
+  verifyLoginOtp,
   getMe,
   updateProfile,
 };
